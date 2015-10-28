@@ -84,7 +84,10 @@ namespace Xintric.MUtil
                 }
                 else
                 {
-                    if (services.Length == 1) StopService(services.First().ServiceName);
+                    if (services.Length == 1)
+                    {
+                        StopService(services.First().ServiceName);
+                    }
                     else
                     {
                         System.Console.Error.WriteLine(String.Format("Multiple services are available. Please specify which service to stop.\nAvailable services:\n{0}",
@@ -93,27 +96,26 @@ namespace Xintric.MUtil
                     }
                 }
             }
-            else if (args.Length == 1 && args[0] == "run")
+            else if (args.Length == 1 && args[0] == "list")
             {
-                if (args.Length == 2)
+                System.Console.WriteLine($"Available services:\n{services.Select(x => x.ServiceName).Aggregate((src, next) => $"{src}\n{next}")}");              
+            }
+            else if (args.Length > 1 && args[0] == "run")
+            {
+
+                var servicename = args[1];
+                var service = services.FirstOrDefault(x => x.ServiceName == servicename);
+                if (service == null)
                 {
-                    throw new NotImplementedException();
-                    //                    StopService(args[1]);
+                    System.Console.WriteLine($"Invalid service name \"{servicename}\".");
+                    return 1;
                 }
-                else
-                {
-                    if (services.Length == 1)
-                    {
-                        throw new NotImplementedException();
-                        //                        StopService(services.First().ServiceName);
-                    }
-                    else
-                    {
-                        System.Console.Error.WriteLine(String.Format("Multiple services are available. Please specify which service to stop.\nAvailable services:\n{0}",
-                            services.Select(x => x.ServiceName).Aggregate((src, next) => src + "\n" + next)));
-                        return 1;
-                    }
-                }
+
+                var method = service.GetType().GetMethod("OnStart", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method.Invoke(service, new object[] { args.Skip(2).ToArray() });
+
+                System.Threading.Thread.Sleep(-1);
+
 
                 return 0;
             }
@@ -123,7 +125,7 @@ namespace Xintric.MUtil
             }
             else
             {
-                System.Console.WriteLine("Invalid parameter. valid parameters are:\ninstall\nuninstall\nstart [servicename]\nstop [servicename]\nrun [servicename]\nlist");
+                System.Console.WriteLine("Invalid parameter. valid parameters are:\ninstall\nuninstall\nstart [servicename]\nstop [servicename]\nrun [servicename] [parameters...]\nlist");
                 return 1;
             }
 
