@@ -14,41 +14,39 @@ namespace Xintric.MUtil
     /// * Create a service class, based on ServiceBase. Implement its methods.
     /// * Create an installer class, based on ServiceInstaller. Simply create a default constructor and pass the parameters you wish to base. ServiceName must match the ServiceName in the service object! Add the [RunInstaller(true)] attribute on the class.
     /// </summary>
-    public class ServiceInstaller : System.Configuration.Install.Installer
+    public class ExecutableServiceInstaller : System.Configuration.Install.Installer
     {
-        /// <summary>
-        /// Public Constructor for WindowsServiceInstaller.
-        /// - Put all of your Initialization code here.
-        /// </summary>
-        public ServiceInstaller(string servicename, string displayname, string description)
+
+
+        public System.ServiceProcess.ServiceProcessInstaller ProcessInstaller { get; }
+
+        public ExecutableServiceInstaller()
         {
             //# Service Account Information
-            System.ServiceProcess.ServiceProcessInstaller serviceProcessInstaller =
-                               new System.ServiceProcess.ServiceProcessInstaller();
-            serviceProcessInstaller.Account = System.ServiceProcess.ServiceAccount.LocalSystem;
-            serviceProcessInstaller.Username = null;
-            serviceProcessInstaller.Password = null;
-            this.Installers.Add(serviceProcessInstaller);
+            ProcessInstaller = new System.ServiceProcess.ServiceProcessInstaller();
+            /*
+                        ProcessInstaller.Account = System.ServiceProcess.ServiceAccount.LocalSystem;
+                        ProcessInstaller.Username = null;
+                        ProcessInstaller.Password = null;
+            */
+            this.Installers.Add(ProcessInstaller);
+            /*
+                        System.ServiceProcess.ServiceInstaller serviceInstaller = new System.ServiceProcess.ServiceInstaller();
+                        //# Service Information
+                        serviceInstaller.DisplayName = displayname;
+                        serviceInstaller.Description = description;
+                        serviceInstaller.StartType = System.ServiceProcess.ServiceStartMode.Automatic;
 
-            System.ServiceProcess.ServiceInstaller serviceInstaller = new System.ServiceProcess.ServiceInstaller();
-            //# Service Information
-            serviceInstaller.DisplayName = displayname;
-            serviceInstaller.Description = description;
-            serviceInstaller.StartType = System.ServiceProcess.ServiceStartMode.Automatic;
+                        serviceInstaller.ServiceName = servicename;
 
-            serviceInstaller.ServiceName = servicename;
-
-            this.Installers.Add(serviceInstaller);
+                        this.Installers.Add(serviceInstaller);
+            */
         }
 
         public static void RunService(System.ServiceProcess.ServiceBase service, string[] args)
         {
             var method = service.GetType().GetMethod("OnStart", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
             method.Invoke(service, new object[] { args });
-
-            System.Threading.Thread.Sleep(-1);
-
-
         }
 
         class CommandFormatException : FormatException
@@ -62,49 +60,76 @@ namespace Xintric.MUtil
             public Func<string, int> Stop { get; set; }
             public Func<string, int> Pause { get; set; }
             public Func<string, int> Continue { get; set; }
+            public Func<string, int, int> Execute { get; set; }
 
-            public CommandParser(System.ServiceProcess.ServiceBase[] services)
+            public CommandParser(IEnumerable<System.ServiceProcess.ServiceBase> services)
             {
-                Services = services;
+                Services = services.ToDictionary(x => x.ServiceName, x => x);
+                DefaultServiceName = Services.Count == 1 ? Services.Values.First().ServiceName : null;
             }
-            System.ServiceProcess.ServiceBase[] Services;
+            string DefaultServiceName;
+            Dictionary<string, System.ServiceProcess.ServiceBase> Services;
 
 
-            Tuple<string, string[]> ParseArguments(string[] args, bool allowarguments)
-            {
-                if (args.Length == 0)
-                {
-                    if (Services.Length != 1) throw new CommandFormatException("Multiple services are available. Please specify servicename.");
-                    return new Tuple<string, string[]>(Services[0].ServiceName, new string[] { });
-                }
-                else
-                {
-                    if (args.Length > 1 && !allowarguments) throw new CommandFormatException("Command did not expect parameters.");
-                    return new Tuple<string, string[]>(args[0], args.Skip(1).ToArray());
-                }
-            }
+
 
             public int Parse(string[] args)
             {
 
                 var command = args[0];
 
-                var commandarguments = args.Skip(1).ToArray();
+                string servicename;
+                string[] commandarguments;
+
+                if (Services.Count == 1) //single service mode
+                {
+                    if (args.Length == 1) //no service specified
+                    {
+                        servicename = Services.Values.First().ServiceName;
+                        commandarguments = new string[0];
+                    }
+                    else
+                    {
+                        servicename = args[1];
+                        commandarguments = args.Skip(2).ToArray();
+                    }
+                }
+                else //multi service mode
+                {
+                    if (args.Length == 1) //no service specified
+                    {
+                        throw new CommandFormatException("Multiple services are available. Please specify servicename.");
+                    }
+                    else
+                    {
+                        servicename = args[1];
+                        commandarguments = args.Skip(2).ToArray();
+                    }
+                }
+
+                if (!Services.ContainsKey(servicename)) throw new CommandFormatException($"Invalid service \"{servicename}\".");
+                var service = Services[servicename];
+
 
                 switch (command)
                 {
                     case "start":
-                        var startargs = ParseArguments(commandarguments, allowarguments: true);
-                        return Start(startargs.Item1, startargs.Item2);
+                        return Start(servicename, commandarguments);
                     case "stop":
-                        var stopargs = ParseArguments(commandarguments, allowarguments: false);
-                        return Stop(stopargs.Item1);
+                        if (commandarguments.Length != 0) throw new CommandFormatException("stop command did not expect arguments.");
+                        if (!service.CanStop) throw new CommandFormatException($"Service \"{servicename}\" does not support stop.");
+                        return Stop(servicename);
                     case "pause":
-                        var pauseargs = ParseArguments(commandarguments, allowarguments: false);
-                        return Pause(pauseargs.Item1);
+                        if (commandarguments.Length != 0) throw new CommandFormatException("pause command did not expect arguments.");
+                        if (!service.CanPauseAndContinue) throw new CommandFormatException($"Service \"{servicename}\" does not support pause and continue.");
+                        return Pause(servicename);
                     case "continue":
-                        var continueargs = ParseArguments(commandarguments, allowarguments: false);
-                        return Pause(continueargs.Item1);
+                        if (commandarguments.Length != 0) throw new CommandFormatException("continue command did not expect arguments.");
+                        if (!service.CanPauseAndContinue) throw new CommandFormatException($"Service \"{servicename}\" does not support pause and continue.");
+                        return Continue(servicename);
+                    case "execute":
+                        if (commandarguments.Length != 1) throw new CommandFormatException("Expected <value> as parameter for executecommand.");
+                        return Execute(servicename, Convert.ToInt32(commandarguments[0]));
                     default:
                         throw new CommandFormatException($"Invalid command <{command}>");
                 }
@@ -126,9 +151,13 @@ namespace Xintric.MUtil
                 }
                 if (args[0] == "install") return InstallService(assembly);
                 if (args[0] == "uninstall") return UninstallService(assembly);
-                if (args[0] == "startconsole") return InteractiveManager.StartNew(services);
+                if (args[0] == "startconsole") return InteractiveConsole.StartNew(services);
+                if (args[0] == "status")
+                {
+                    ShowStatus(services);
+                    return 0;
+                }
             }
-
 
             var parser = new CommandParser(services);
 
@@ -136,11 +165,28 @@ namespace Xintric.MUtil
             parser.Stop = servicename => StopService(servicename);
             parser.Pause = servicename => PauseService(servicename);
             parser.Continue = servicename => ContinueService(servicename);
-
+            parser.Execute = (servicename, value) => ExecuteServiceCommand(servicename, value);
             return parser.Parse(args);
         }
 
+        public static void ShowStatus(System.ServiceProcess.ServiceBase[] services)
+        {
+            foreach (var service in services)
+            {
+                System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(service.ServiceName);
+                System.Console.WriteLine(
+                    $@" 
+{ service.ServiceName}:
+    Status: { sc.Status }
+    CanHandlePowerEvent: {service.CanHandlePowerEvent}
+    CanHandleSessionChangeEvent: {service.CanHandleSessionChangeEvent}
+    CanPauseAndContinue: {service.CanPauseAndContinue}
+    CanShutdown: {service.CanShutdown}
+    CanStop: {service.CanStop}
 
+");
+            }
+        }
 
         public static int ServiceMain(System.Reflection.Assembly assembly, string[] args, System.ServiceProcess.ServiceBase[] services)
         {
@@ -161,7 +207,10 @@ Usage:
     stop [service]
     pause [service]
     continue [service]
+    execute <service> <value>
+    run [service] [args...]
     list
+    status
     startconsole");
                 return 1;
             }
@@ -213,12 +262,18 @@ Usage:
             return 0;
         }
 
+        public static int ExecuteServiceCommand(string servicename, int value)
+        {
+            System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(servicename);
+            sc.ExecuteCommand(value);
+            return 0;
+        }
 
 
-        class InteractiveManager
+        class InteractiveConsole
         {
 
-            public InteractiveManager(System.ServiceProcess.ServiceBase[] services)
+            public InteractiveConsole(System.ServiceProcess.ServiceBase[] services)
             {
                 Services = services;
                 Parser = new CommandParser(services);
@@ -243,6 +298,11 @@ Usage:
                     ContinueAsync(name).ContinueWith(task => ShowException(task.Exception));
                     return 0;
                 };
+                Parser.Execute = (name, value) =>
+                {
+                    ExecuteServiceCommandAsync(name, value).ContinueWith(task => ShowException(task.Exception));
+                    return 0;
+                };
             }
 
             System.ServiceProcess.ServiceBase[] Services;
@@ -255,7 +315,8 @@ Usage:
             }
 
             CommandParser Parser;
-            Dictionary<string, Task> runningservices = new Dictionary<string, Task>();
+            Dictionary<string, Task> servicetasks = new Dictionary<string, Task>();
+            Dictionary<string, System.ServiceProcess.ServiceControllerStatus> servicestatuses = new Dictionary<string, System.ServiceProcess.ServiceControllerStatus>();
 
             object reportlocker = new object();
             void SendReport(string msg)
@@ -283,19 +344,21 @@ Usage:
             async Task StartAsync(string servicename, string[] args)
             {
                 Task servicetask;
-                lock (runningservices)
+                lock (servicetasks)
                 {
-                    if (runningservices.ContainsKey(servicename)) throw new InvalidOperationException($"Service \"{servicename}\" is already started.");
+                    if (servicetasks.ContainsKey(servicename)) throw new InvalidOperationException($"Service \"{servicename}\" is already started.");
                     var service = GetService(servicename);
                     var method = service.GetType().GetMethod("OnStart", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     SendReport($"Service {servicename} is starting.");
+                    servicestatuses[servicename] = System.ServiceProcess.ServiceControllerStatus.Running;
                     servicetask = Task.Run(() => method.Invoke(service, new object[] { args }));
-                    runningservices[servicename] = servicetask;
+                    servicetasks[servicename] = servicetask;
                 }
                 await servicetask;
-                lock (runningservices)
+                lock (servicetasks)
                 {
-                    runningservices.Remove(servicename);
+                    servicetasks.Remove(servicename);
+                    servicestatuses.Remove(servicename);
                 }
                 SendReport($"Service {servicename} stopped.");
             }
@@ -304,10 +367,11 @@ Usage:
             {
                 var service = GetService(servicename);
                 Task servicetask;
-                lock (runningservices)
+                lock (servicetasks)
                 {
-                    if (!runningservices.ContainsKey(servicename)) throw new KeyNotFoundException($"Service {servicename} is not running.");
+                    if (!servicetasks.ContainsKey(servicename)) throw new KeyNotFoundException($"Service {servicename} is not running.");
                     var method = service.GetType().GetMethod("OnStop", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    servicestatuses[servicename] = System.ServiceProcess.ServiceControllerStatus.StopPending;
                     servicetask = Task.Run(() => method.Invoke(service, new object[] { }));
                 }
                 await servicetask;
@@ -318,13 +382,18 @@ Usage:
             {
                 var service = GetService(servicename);
                 Task servicetask;
-                lock (runningservices)
+                lock (servicetasks)
                 {
-                    if (!runningservices.ContainsKey(servicename)) throw new KeyNotFoundException($"Service {servicename} is not running.");
+                    if (!servicetasks.ContainsKey(servicename)) throw new KeyNotFoundException($"Service {servicename} is not running.");
                     var method = service.GetType().GetMethod("OnPause", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    servicestatuses[servicename] = System.ServiceProcess.ServiceControllerStatus.PausePending;
                     servicetask = Task.Run(() => method.Invoke(service, new object[] { }));
                 }
                 await servicetask;
+                lock (servicetasks)
+                {
+                    servicestatuses[servicename] = System.ServiceProcess.ServiceControllerStatus.Paused;
+                }
                 SendReport($"Pause signal sent to {servicename}.");
             }
 
@@ -332,17 +401,75 @@ Usage:
             {
                 var service = GetService(servicename);
                 Task servicetask;
-                lock (runningservices)
+                lock (servicetasks)
                 {
-                    if (!runningservices.ContainsKey(servicename)) throw new KeyNotFoundException($"Service {servicename} is not running.");
+                    if (!servicetasks.ContainsKey(servicename)) throw new KeyNotFoundException($"Service {servicename} is not running.");
                     var method = service.GetType().GetMethod("OnContinue", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    servicestatuses[servicename] = System.ServiceProcess.ServiceControllerStatus.ContinuePending;
                     servicetask = Task.Run(() => method.Invoke(service, new object[] { }));
                 }
                 await servicetask;
+                lock (servicetasks)
+                {
+                    servicestatuses[servicename] = System.ServiceProcess.ServiceControllerStatus.Running;
+                }
                 SendReport($"Continue signal sent to {servicename}.");
             }
 
+            async Task ExecuteServiceCommandAsync(string servicename, int value)
+            {
+                var service = GetService(servicename);
+                Task servicetask;
+                lock (servicetasks)
+                {
+                    if (!servicetasks.ContainsKey(servicename)) throw new KeyNotFoundException($"Service {servicename} is not running.");
+                    var method = service.GetType().GetMethod("OnCustomCommand", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    servicetask = Task.Run(() => method.Invoke(service, new object[] { value }));
+                }
+                await servicetask;
+                SendReport($"ExecuteCommand ({value}) signal sent to {servicename}.");
 
+            }
+
+
+            void ShowUsage()
+            {
+                System.Console.WriteLine(
+@"Available commands:
+    start [service] [args...]
+    stop [service]
+    pause [service]
+    continue [service]
+    execute <service> <value>
+    list
+    status
+    help
+    quit");
+
+            }
+
+
+            void ShowStatus()
+            {
+                lock (servicetasks)
+                {
+                    foreach (var service in Services)
+                    {
+                        System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(service.ServiceName);
+                        System.Console.WriteLine(
+                            $@" 
+{ service.ServiceName}:
+    Status: { (servicestatuses.ContainsKey(service.ServiceName) ? servicestatuses[service.ServiceName] : System.ServiceProcess.ServiceControllerStatus.Stopped) }
+    CanHandlePowerEvent: {service.CanHandlePowerEvent}
+    CanHandleSessionChangeEvent: {service.CanHandleSessionChangeEvent}
+    CanPauseAndContinue: {service.CanPauseAndContinue}
+    CanShutdown: {service.CanShutdown}
+    CanStop: {service.CanStop}
+
+");
+                    }
+                }
+            }
 
 
             public int Run()
@@ -353,10 +480,30 @@ Usage:
                     if (args.Length == 1)
                     {
                         if (args[0] == "quit") break;
+                        if (args[0] == "help")
+                        {
+                            ShowUsage();
+                            continue;
+                        }
+                        if (args[0] == "status")
+                        {
+                            ShowStatus();
+                            continue;
+                        }
+                        if (args[0] == "list")
+                        {
+                            System.Console.WriteLine($"Available services:\n\t{Services.Select(x => x.ServiceName).Aggregate((src, next) => $"{src}\n\t{next}")}\n");
+                            continue;
+                        }
                     }
                     try
                     {
                         Parser.Parse(args);
+                    }
+                    catch (CommandFormatException e)
+                    {
+                        ShowException(e);
+                        ShowUsage();
                     }
                     catch (Exception e)
                     {
@@ -366,7 +513,7 @@ Usage:
                 return 0;
             }
 
-            public static int StartNew(System.ServiceProcess.ServiceBase[] services) => new InteractiveManager(services).Run();
+            public static int StartNew(System.ServiceProcess.ServiceBase[] services) => new InteractiveConsole(services).Run();
 
         }
 
