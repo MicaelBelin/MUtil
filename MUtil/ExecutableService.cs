@@ -1,53 +1,228 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
+using System.ServiceProcess;
 using System.Threading.Tasks;
 
 namespace Xintric.MUtil
 {
-
-
-
-    /// <summary>
-    /// 
-    /// * Create a service class, based on ServiceBase. Implement its methods.
-    /// * Create an installer class, based on ServiceInstaller. Simply create a default constructor and pass the parameters you wish to base. ServiceName must match the ServiceName in the service object! Add the [RunInstaller(true)] attribute on the class.
-    /// </summary>
-    public class ExecutableServiceInstaller : System.Configuration.Install.Installer
+    public class ExecutableService
     {
 
-
-        public System.ServiceProcess.ServiceProcessInstaller ProcessInstaller { get; }
-
-        public ExecutableServiceInstaller()
+        public ExecutableService(ServiceBase[] services) : this(services, System.Reflection.Assembly.GetExecutingAssembly()) { }
+        public ExecutableService(ServiceBase[] services, System.Reflection.Assembly installerassembly)
         {
-            //# Service Account Information
-            ProcessInstaller = new System.ServiceProcess.ServiceProcessInstaller();
-            /*
-                        ProcessInstaller.Account = System.ServiceProcess.ServiceAccount.LocalSystem;
-                        ProcessInstaller.Username = null;
-                        ProcessInstaller.Password = null;
-            */
-            this.Installers.Add(ProcessInstaller);
-            /*
-                        System.ServiceProcess.ServiceInstaller serviceInstaller = new System.ServiceProcess.ServiceInstaller();
-                        //# Service Information
-                        serviceInstaller.DisplayName = displayname;
-                        serviceInstaller.Description = description;
-                        serviceInstaller.StartType = System.ServiceProcess.ServiceStartMode.Automatic;
-
-                        serviceInstaller.ServiceName = servicename;
-
-                        this.Installers.Add(serviceInstaller);
-            */
+            if (services.Length == 0) throw new InvalidOperationException("No services in assembly");
+            Services = services;
+            InstallerAssembly = installerassembly;
         }
 
-        public static void RunService(System.ServiceProcess.ServiceBase service, string[] args)
+
+        public static int ServiceMain(string[] args, ServiceBase[] services)
+            => ServiceMain(args, services, System.Reflection.Assembly.GetExecutingAssembly());
+
+
+        public int InstallService()
+        {
+            System.Configuration.Install.AssemblyInstaller Installer = new System.Configuration.Install.AssemblyInstaller(InstallerAssembly.Location, null);
+            Installer.UseNewContext = true;
+            Installer.Install(null);
+            Installer.Commit(null);
+            return 0;
+        }
+
+        public int UninstallService()
+        {
+            System.Configuration.Install.AssemblyInstaller Installer = new System.Configuration.Install.AssemblyInstaller(InstallerAssembly.Location, null);
+            Installer.UseNewContext = true;
+            Installer.Uninstall(null);
+            return 0;
+        }
+
+        public void RunService(ServiceBase service, string[] args)
         {
             var method = service.GetType().GetMethod("OnStart", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
             method.Invoke(service, new object[] { args });
         }
+
+
+        public int StartService(string servicename, string[] args)
+        {
+            ServiceController sc = new ServiceController(servicename);
+            sc.Start();
+            return 0;
+        }
+
+        public int StopService(string servicename)
+        {
+            ServiceController sc = new ServiceController(servicename);
+            sc.Stop();
+            return 0;
+        }
+
+        public int PauseService(string servicename)
+        {
+            ServiceController sc = new ServiceController(servicename);
+            sc.Pause();
+            return 0;
+        }
+
+        public int ContinueService(string servicename)
+        {
+            ServiceController sc = new ServiceController(servicename);
+            sc.Continue();
+            return 0;
+        }
+
+        public int ExecuteServiceCommand(string servicename, int value)
+        {
+            ServiceController sc = new ServiceController(servicename);
+            sc.ExecuteCommand(value);
+            return 0;
+        }
+
+
+        public ServiceBase[] Services { get; }
+        System.Reflection.Assembly InstallerAssembly;
+
+
+        public static int ServiceMain(string[] args, ServiceBase[] services, System.Reflection.Assembly installerassembly)
+            => new ExecutableService(services, installerassembly).ConsoleExecute(args);
+
+        public int ConsoleExecute(string[] args)
+        {
+            try
+            {
+                return Execute(args);
+            }
+            catch (CommandFormatException e)
+            {
+                System.Console.WriteLine(
+$@"{e.Message}
+Usage: 
+    install
+    uninstall
+    start [service] [args...]
+    stop [service]
+    pause [service]
+    continue [service]
+    execute <service> <value>
+    run [service] [args...]
+    list
+    status
+    startconsole");
+                return 1;
+            }
+
+        }
+
+        public int Execute(string[] args)
+        {
+            if (args.Length == 0)
+            {
+                System.ServiceProcess.ServiceBase.Run(Services);
+                return 0;
+            }
+
+            if (args.Length == 1)
+            {
+                if (args[0] == "list")
+                {
+                    System.Console.WriteLine($"Available services:\n\t{Services.Select(x => x.ServiceName).Aggregate((src, next) => $"{src}\n\t{next}")}\n");
+                    return 0;
+                }
+                if (args[0] == "install") return InstallService();
+                if (args[0] == "uninstall") return UninstallService();
+                if (args[0] == "startconsole") return InteractiveConsole.StartNew(Services);
+                if (args[0] == "status")
+                {
+                    ShowStatus();
+                    return 0;
+                }
+                if (args[0] == "run")
+                {
+                    if (Services.Length != 1) throw new CommandFormatException("Multiple services are available. Please specify servicename.");
+                    RunService(Services[0], new string[] { });
+                    return 0;
+                }
+            }
+
+            if (args[0] == "run")
+            {
+                var servicename = args[1];
+                var service = Services.FirstOrDefault(x => x.ServiceName == servicename);
+                if (Services.Length == 0) throw new CommandFormatException($"Invalid service \"{servicename}\".");
+                RunService(service, args.Skip(1).ToArray());
+            }
+
+
+            var parser = new CommandParser(Services);
+
+            parser.Start = (servicename, serviceargs) => StartService(servicename, serviceargs);
+            parser.Stop = servicename => StopService(servicename);
+            parser.Pause = servicename => PauseService(servicename);
+            parser.Continue = servicename => ContinueService(servicename);
+            parser.Execute = (servicename, value) => ExecuteServiceCommand(servicename, value);
+            return parser.Parse(args);
+        }
+
+
+        public void ShowStatus()
+        {
+            foreach (var service in Services)
+            {
+                System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(service.ServiceName);
+                System.Console.WriteLine(
+                    $@" 
+{ service.ServiceName}:
+    Status: { sc.Status }
+    CanHandlePowerEvent: {service.CanHandlePowerEvent}
+    CanHandleSessionChangeEvent: {service.CanHandleSessionChangeEvent}
+    CanPauseAndContinue: {service.CanPauseAndContinue}
+    CanShutdown: {service.CanShutdown}
+    CanStop: {service.CanStop}
+
+");
+            }
+        }
+
+
+
+
+
+        /*
+          
+            [System.ComponentModel.RunInstaller(true)]
+            public class Installer : ExecutableService.Installer
+            {
+                public Installer()
+                {
+                    ProcessInstaller.Account = System.ServiceProcess.ServiceAccount.LocalSystem;
+                    Installers.Add(new System.ServiceProcess.ServiceInstaller()
+                    {                
+                        ServiceName = nameof(ConnectionMonitor),
+                        DisplayName = "Connection monitor",
+                        Description = "Monitors various endpoints for connectivity and response time.",
+                        StartType = System.ServiceProcess.ServiceStartMode.Automatic,
+                    });
+                }
+            }
+            
+       
+        */
+        public class Installer : System.Configuration.Install.Installer
+        {
+            public System.ServiceProcess.ServiceProcessInstaller ProcessInstaller { get; }
+
+            public Installer()
+            {
+                //# Service Account Information
+                ProcessInstaller = new System.ServiceProcess.ServiceProcessInstaller();
+                this.Installers.Add(ProcessInstaller);
+            }
+        }
+
+
 
         class CommandFormatException : FormatException
         {
@@ -137,137 +312,6 @@ namespace Xintric.MUtil
             }
         }
 
-
-        public static int ExecuteCommand(System.Reflection.Assembly assembly, string[] args, System.ServiceProcess.ServiceBase[] services)
-        {
-            if (args.Length == 0) throw new CommandFormatException("Please specify a command.");
-
-            if (args.Length == 1)
-            {
-                if (args[0] == "list")
-                {
-                    System.Console.WriteLine($"Available services:\n\t{services.Select(x => x.ServiceName).Aggregate((src, next) => $"{src}\n\t{next}")}\n");
-                    return 0;
-                }
-                if (args[0] == "install") return InstallService(assembly);
-                if (args[0] == "uninstall") return UninstallService(assembly);
-                if (args[0] == "startconsole") return InteractiveConsole.StartNew(services);
-                if (args[0] == "status")
-                {
-                    ShowStatus(services);
-                    return 0;
-                }
-            }
-
-            var parser = new CommandParser(services);
-
-            parser.Start = (servicename, serviceargs) => StartService(servicename, serviceargs);
-            parser.Stop = servicename => StopService(servicename);
-            parser.Pause = servicename => PauseService(servicename);
-            parser.Continue = servicename => ContinueService(servicename);
-            parser.Execute = (servicename, value) => ExecuteServiceCommand(servicename, value);
-            return parser.Parse(args);
-        }
-
-        public static void ShowStatus(System.ServiceProcess.ServiceBase[] services)
-        {
-            foreach (var service in services)
-            {
-                System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(service.ServiceName);
-                System.Console.WriteLine(
-                    $@" 
-{ service.ServiceName}:
-    Status: { sc.Status }
-    CanHandlePowerEvent: {service.CanHandlePowerEvent}
-    CanHandleSessionChangeEvent: {service.CanHandleSessionChangeEvent}
-    CanPauseAndContinue: {service.CanPauseAndContinue}
-    CanShutdown: {service.CanShutdown}
-    CanStop: {service.CanStop}
-
-");
-            }
-        }
-
-        public static int ServiceMain(System.Reflection.Assembly assembly, string[] args, System.ServiceProcess.ServiceBase[] services)
-        {
-            if (services.Length == 0) throw new InvalidOperationException("No services in assembly");
-
-            try
-            {
-                return ExecuteCommand(assembly, args, services);
-            }
-            catch (CommandFormatException e)
-            {
-                System.Console.WriteLine(
-$@"{e.Message}
-Usage: 
-    install
-    uninstall
-    start [service] [args...]
-    stop [service]
-    pause [service]
-    continue [service]
-    execute <service> <value>
-    run [service] [args...]
-    list
-    status
-    startconsole");
-                return 1;
-            }
-        }
-
-
-        public static int InstallService(System.Reflection.Assembly assembly)
-        {
-            System.Configuration.Install.AssemblyInstaller Installer = new System.Configuration.Install.AssemblyInstaller(assembly.Location, null);
-            Installer.UseNewContext = true;
-            Installer.Install(null);
-            Installer.Commit(null);
-            return 0;
-        }
-
-        public static int UninstallService(System.Reflection.Assembly assembly)
-        {
-            System.Configuration.Install.AssemblyInstaller Installer = new System.Configuration.Install.AssemblyInstaller(assembly.Location, null);
-            Installer.UseNewContext = true;
-            Installer.Uninstall(null);
-            return 0;
-        }
-
-        public static int StartService(string servicename, string[] args)
-        {
-            System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(servicename);
-            sc.Start();
-            return 0;
-        }
-
-        public static int StopService(string servicename)
-        {
-            System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(servicename);
-            sc.Stop();
-            return 0;
-        }
-
-        public static int PauseService(string servicename)
-        {
-            System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(servicename);
-            sc.Pause();
-            return 0;
-        }
-
-        public static int ContinueService(string servicename)
-        {
-            System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(servicename);
-            sc.Continue();
-            return 0;
-        }
-
-        public static int ExecuteServiceCommand(string servicename, int value)
-        {
-            System.ServiceProcess.ServiceController sc = new System.ServiceProcess.ServiceController(servicename);
-            sc.ExecuteCommand(value);
-            return 0;
-        }
 
 
         class InteractiveConsole
@@ -519,40 +563,6 @@ Usage:
 
 
 
+
     }
-
-
-
-    //Sample implementation
-    //[System.ComponentModel.RunInstaller(true)]
-    //public class Installer : Xintric.MUtil.ServiceInstaller
-    //{
-    //    public Installer()
-    //        : base("TestService", "my test agent", "This is a test agent for [TEST]")
-    //    {
-    //        System.Console.WriteLine("Got here!");
-    //    }
-    //}
-
-    //public class Service1 : System.ServiceProcess.ServiceBase
-    //{
-
-
-
-    //    public Service1()
-    //    {
-    //        this.ServiceName = "TestService";
-    //    }
-
-    //    protected override void OnStart(string[] args)
-    //    {
-    //    }
-
-    //    protected override void OnStop()
-    //    {
-    //    }
-    //}
-
-
 }
-
